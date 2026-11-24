@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>DocScanner Pro</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>DocScanner Pro</h1>
+      <span class="badge">Offline A+ Engine</span>
+    </div>
+    <button id="flashBtn" class="icon-btn" onclick="toggleFlashlight()">Flash: OFF</button>
+  </header>
+
+  <main id="appContent">
+    <!-- TAB 1: DOCUMENTS & FOLDERS -->
+    <section id="tab-docs" class="tab-panel active">
+      <div class="breadcrumb-bar">
+        <span id="folderPath">Home</span>
+        <button class="small-btn" onclick="goUpFolder()">Back</button>
+        <button class="small-btn primary" onclick="createFolderPrompt()">+ Folder</button>
+      </div>
+
+      <div class="action-grid">
+        <label class="action-card">
+          <strong>Camera Scan</strong>
+          <span>Whiteboard / Paper</span>
+          <input type="file" accept="image/*" capture="environment" hidden onchange="handleImageInput(event)" />
+        </label>
+        <label class="action-card">
+          <strong>Gallery to PDF</strong>
+          <span>Multiple Images</span>
+          <input type="file" accept="image/*" multiple hidden onchange="handleImageInput(event)" />
+        </label>
+      </div>
+
+      <div class="export-bar">
+        <select id="pdfSizeSelect">
+          <option value="A4">PDF Size: A4</option>
+          <option value="A1">PDF Size: A1</option>
+          <option value="A2">PDF Size: A2</option>
+          <option value="A3">PDF Size: A3</option>
+          <option value="A5">PDF Size: A5</option>
+          <option value="A6">PDF Size: A6</option>
+          <option value="Letter">PDF Size: Letter</option>
+          <option value="Postcard">PDF Size: Postcard</option>
+          <option value="Note">PDF Size: Note</option>
+        </select>
+        <button class="small-btn primary" onclick="exportFolderPdf('save')">Save PDF</button>
+        <button class="small-btn" onclick="exportFolderPdf('share')">Cloud / Share</button>
+        <button class="small-btn" onclick="exportFolderPdf('print')">Print / Fax</button>
+      </div>
+
+      <div id="folderList" class="list-grid"></div>
+      <div id="docList" class="doc-grid"></div>
+    </section>
+
+    <!-- TAB 2: SMART EDITOR & FILTERS -->
+    <section id="tab-editor" class="tab-panel">
+      <div class="editor-header">
+        <button class="small-btn" onclick="switchTab('docs')">Cancel</button>
+        <button class="small-btn" onclick="autoDetectEdges()">Auto Crop</button>
+        <button class="small-btn" onclick="rotateImage()">Rotate 90</button>
+        <button class="small-btn primary" onclick="saveEditedDoc()">Save Scan</button>
+      </div>
+
+      <div class="canvas-wrap">
+        <canvas id="editorCanvas"></canvas>
+      </div>
+
+      <div class="crop-controls">
+        <label>Top <input type="range" id="cropTop" min="0" max="40" value="0" oninput="renderPreview()" /></label>
+        <label>Bottom <input type="range" id="cropBottom" min="0" max="40" value="0" oninput="renderPreview()" /></label>
+        <label>Left <input type="range" id="cropLeft" min="0" max="40" value="0" oninput="renderPreview()" /></label>
+        <label>Right <input type="range" id="cropRight" min="0" max="40" value="0" oninput="renderPreview()" /></label>
+      </div>
+
+      <div class="filter-strip">
+        <button class="filter-chip active" onclick="setFilter('original', this)">Color</button>
+        <button class="filter-chip" onclick="setFilter('magic', this)">Auto Enhance</button>
+        <button class="filter-chip" onclick="setFilter('bw', this)">B/W Crisp</button>
+        <button class="filter-chip" onclick="setFilter('grey', this)">Grey</button>
+        <button class="filter-chip" onclick="setFilter('skyblue', this)">Sky Blue</button>
+        <button class="filter-chip" onclick="setFilter('lighten', this)">Lighten</button>
+        <button class="filter-chip" onclick="setFilter('dark', this)">Dark</button>
+        <button class="filter-chip" onclick="setFilter('denoise', this)">Remove Grain</button>
+      </div>
+    </section>
+
+    <!-- TAB 3: QR & BARCODE -->
+    <section id="tab-qr" class="tab-panel">
+      <div class="card">
+        <h3>Scan QR Code / Barcode</h3>
+        <p class="muted">Offline ML Kit scanner — camera ya gallery se photo lein.</p>
+        <div class="row-btns">
+          <label class="small-btn primary">
+            Scan via Camera
+            <input type="file" accept="image/*" capture="environment" hidden onchange="scanQrImage(event)" />
+          </label>
+          <label class="small-btn">
+            Scan from Gallery
+            <input type="file" accept="image/*" hidden onchange="scanQrImage(event)" />
+          </label>
+        </div>
+        <textarea id="qrScanOutput" rows="3" placeholder="Scanned QR / Barcode result yahan dikhega..." readonly></textarea>
+        <button class="small-btn primary" onclick="shareQrResult()">Share Scanned Result</button>
+      </div>
+
+      <div class="card">
+        <h3>Create QR Code</h3>
+        <input type="text" id="qrInputText" placeholder="Text, URL, ya UPI link likhein..." />
+        <button class="small-btn primary" onclick="createQrCode()">Generate QR</button>
+        <div id="qrPreviewBox" class="qr-box"></div>
+        <div class="row-btns">
+          <button class="small-btn" onclick="exportGeneratedQr('save')">Save QR</button>
+          <button class="small-btn" onclick="exportGeneratedQr('share')">Share QR</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 4: OCR (UPCOMING) -->
+    <section id="tab-ocr" class="tab-panel">
+      <div class="card center">
+        <span class="badge">Next Update</span>
+        <h2>OCR Text Recognition</h2>
+        <p class="muted">Agle update mein aap kisi bhi scanned image se seedha text extract, edit aur share kar sakenge — 100% offline.</p>
+      </div>
+    </section>
+  </main>
+
+  <nav class="bottom-nav">
+    <button class="nav-btn active" onclick="switchTab('docs')">Documents</button>
+    <button class="nav-btn" onclick="switchTab('editor')">Editor</button>
+    <button class="nav-btn" onclick="switchTab('qr')">QR / Bar</button>
+    <button class="nav-btn" onclick="switchTab('ocr')">OCR</button>
+  </nav>
+
+  <script src="app.js"></script>
+</body>
+    </html>
