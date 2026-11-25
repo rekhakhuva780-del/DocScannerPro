@@ -3,6 +3,8 @@ package com.docscanner.pro
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -39,6 +41,9 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.devanagari.DevanagariTextRecognizerOptions
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import org.json.JSONObject
@@ -173,6 +178,15 @@ class MainActivity : AppCompatActivity() {
         }
 
         @JavascriptInterface
+        fun copyToClipboard(text: String) {
+            runOnUiThread {
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("DocScanner OCR", text))
+                Toast.makeText(this@MainActivity, "Text clipboard par copy ho gaya", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        @JavascriptInterface
         fun toggleFlash(enable: Boolean): Boolean {
             return try {
                 val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -245,7 +259,7 @@ class MainActivity : AppCompatActivity() {
                 putExtra(Intent.EXTRA_TEXT, text)
             }
             runOnUiThread {
-                startActivity(Intent.createChooser(intent, "Share QR / Text"))
+                startActivity(Intent.createChooser(intent, "Share Text"))
             }
         }
 
@@ -305,7 +319,7 @@ class MainActivity : AppCompatActivity() {
         fun scanBarcodeFromBase64(base64Image: String) {
             try {
                 val bytes = Base64.decode(base64Image, Base64.DEFAULT)
-                val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return
                 val image = InputImage.fromBitmap(bitmap, 0)
                 val scanner = BarcodeScanning.getClient()
 
@@ -329,6 +343,46 @@ class MainActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 webView.post {
                     webView.evaluateJavascript("window.onNativeBarcodeResult('')", null)
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun runOcrFromBase64(base64Image: String, langMode: String) {
+            try {
+                val bytes = Base64.decode(base64Image, Base64.DEFAULT)
+                val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                if (bitmap == null) {
+                    webView.post {
+                        webView.evaluateJavascript("window.onNativeOcrResult('', 'Image read nahi hui')", null)
+                    }
+                    return
+                }
+
+                val image = InputImage.fromBitmap(bitmap, 0)
+                val recognizer = if (langMode == "hi") {
+                    TextRecognition.getClient(DevanagariTextRecognizerOptions.Builder().build())
+                } else {
+                    TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+                }
+
+                recognizer.process(image)
+                    .addOnSuccessListener { visionText ->
+                        val safeText = JSONObject.quote(visionText.text)
+                        webView.post {
+                            webView.evaluateJavascript("window.onNativeOcrResult($safeText, '')", null)
+                        }
+                    }
+                    .addOnFailureListener { e ->
+                        val err = JSONObject.quote(e.message ?: "OCR failed")
+                        webView.post {
+                            webView.evaluateJavascript("window.onNativeOcrResult('', $err)", null)
+                        }
+                    }
+            } catch (e: Exception) {
+                val err = JSONObject.quote(e.message ?: "OCR error")
+                webView.post {
+                    webView.evaluateJavascript("window.onNativeOcrResult('', $err)", null)
                 }
             }
         }
