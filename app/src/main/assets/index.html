@@ -32,7 +32,7 @@
         </label>
         <label class="action-card">
           <strong>Gallery to PDF</strong>
-          <span>Multiple Images</span>
+          <span>Single / Multiple</span>
           <input type="file" accept="image/*" multiple hidden onchange="handleImageInput(event)" />
         </label>
       </div>
@@ -58,27 +58,39 @@
       <div id="docList" class="doc-grid"></div>
     </section>
 
-    <!-- TAB 2: SMART EDITOR & FILTERS -->
+    <!-- TAB 2: 4-CORNER PERSPECTIVE CROP & FILTERS -->
     <section id="tab-editor" class="tab-panel">
-      <div class="editor-header">
+      <!-- Top Bar for Step 1: Crop & Straighten -->
+      <div id="cropTopBar" class="editor-header">
         <button class="small-btn" onclick="switchTab('docs')">Cancel</button>
-        <button class="small-btn" onclick="autoDetectEdges()">Auto Crop</button>
-        <button class="small-btn" onclick="rotateImage()">Rotate 90</button>
+        <button class="small-btn" onclick="autoDetectCorners()">Auto</button>
+        <button class="small-btn" onclick="resetFullCorners()">Full</button>
+        <button class="small-btn" onclick="rotateImage()">Rotate</button>
+        <button class="small-btn primary" onclick="applyPerspectiveCrop()">Straighten</button>
+      </div>
+
+      <!-- Top Bar for Step 2: Filters & Save -->
+      <div id="filterTopBar" class="editor-header hidden">
+        <button class="small-btn" onclick="backToCropMode()">Re-Crop</button>
+        <button class="small-btn" onclick="runOcrFromEditor()">OCR Text</button>
         <button class="small-btn primary" onclick="saveEditedDoc()">Save Scan</button>
       </div>
 
-      <div class="canvas-wrap">
+      <!-- Full-Fit Responsive Stage (Poori Image Bina Kate Dikhegi) -->
+      <div id="canvasStage" class="canvas-stage">
         <canvas id="editorCanvas"></canvas>
+        <div id="editorEmptyHint" class="empty-hint">
+          Pehle Documents tab se Camera ya Gallery photo chunein.
+        </div>
       </div>
 
-      <div class="crop-controls">
-        <label>Top <input type="range" id="cropTop" min="0" max="40" value="0" oninput="renderPreview()" /></label>
-        <label>Bottom <input type="range" id="cropBottom" min="0" max="40" value="0" oninput="renderPreview()" /></label>
-        <label>Left <input type="range" id="cropLeft" min="0" max="40" value="0" oninput="renderPreview()" /></label>
-        <label>Right <input type="range" id="cropRight" min="0" max="40" value="0" oninput="renderPreview()" /></label>
+      <!-- Bottom Hint for Crop Mode -->
+      <div id="cropBottomHint" class="crop-hint">
+        4 konon (dots) ko kheench kar tedhe page par set karein, fir <strong>Straighten</strong> dabayein.
       </div>
 
-      <div class="filter-strip">
+      <!-- Bottom Filter Strip for Step 2 -->
+      <div id="filterStrip" class="filter-strip hidden">
         <button class="filter-chip active" onclick="setFilter('original', this)">Color</button>
         <button class="filter-chip" onclick="setFilter('magic', this)">Auto Enhance</button>
         <button class="filter-chip" onclick="setFilter('bw', this)">B/W Crisp</button>
@@ -121,12 +133,37 @@
       </div>
     </section>
 
-    <!-- TAB 4: OCR (UPCOMING) -->
+    <!-- TAB 4: OFFLINE OCR TEXT RECOGNITION -->
     <section id="tab-ocr" class="tab-panel">
-      <div class="card center">
-        <span class="badge">Next Update</span>
-        <h2>OCR Text Recognition</h2>
-        <p class="muted">Agle update mein aap kisi bhi scanned image se seedha text extract, edit aur share kar sakenge — 100% offline.</p>
+      <div class="card">
+        <h3>Offline OCR Text Recognition</h3>
+        <p class="muted">Image se text nikalen, edit karein, copy ya share karein — bina internet ke.</p>
+
+        <select id="ocrLangSelect">
+          <option value="hi">Hindi + English (Devanagari &amp; Latin)</option>
+          <option value="en">English Only (Fast Latin)</option>
+        </select>
+
+        <div class="row-btns">
+          <label class="small-btn primary">
+            Camera OCR
+            <input type="file" accept="image/*" capture="environment" hidden onchange="handleOcrFileInput(event)" />
+          </label>
+          <label class="small-btn">
+            Gallery OCR
+            <input type="file" accept="image/*" hidden onchange="handleOcrFileInput(event)" />
+          </label>
+        </div>
+
+        <div id="ocrStatus" class="muted">Koi photo chunein ya saved scan par OCR button dabayein.</div>
+        <textarea id="ocrOutputText" rows="10" placeholder="Extracted text yahan aayega — aap ise edit bhi kar sakte hain..."></textarea>
+
+        <div class="row-btns">
+          <button class="small-btn primary" onclick="copyOcrText()">Copy Text</button>
+          <button class="small-btn" onclick="shareOcrText()">Share Text</button>
+          <button class="small-btn" onclick="saveOcrTxtFile()">Save .TXT</button>
+          <button class="small-btn" onclick="clearOcrText()">Clear</button>
+        </div>
       </div>
     </section>
   </main>
@@ -140,4 +177,4 @@
 
   <script src="app.js"></script>
 </body>
-    </html>
+</html>
