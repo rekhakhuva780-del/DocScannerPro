@@ -32,7 +32,7 @@
         </label>
         <label class="action-card">
           <strong>Gallery to PDF</strong>
-          <span>Single / Multiple</span>
+          <span>Single / Multiple Edit</span>
           <input type="file" accept="image/*" multiple hidden onchange="handleImageInput(event)" />
         </label>
       </div>
@@ -58,12 +58,21 @@
       <div id="docList" class="doc-grid"></div>
     </section>
 
-    <!-- TAB 2: 4-CORNER PERSPECTIVE CROP & FILTERS -->
+    <!-- TAB 2: 4-CORNER + 4-SLIDER CROP, ZOOM & FILTERS -->
     <section id="tab-editor" class="tab-panel">
+      <!-- Batch Gallery Edit Indicator -->
+      <div id="batchBar" class="batch-bar hidden">
+        <span id="batchLabel">Gallery Edit: 1 / 1</span>
+        <div class="batch-btns">
+          <button class="small-btn" onclick="skipBatchItem()">Skip</button>
+          <button class="small-btn" onclick="exitBatchEdit()">Done</button>
+        </div>
+      </div>
+
       <!-- Top Bar for Step 1: Crop & Straighten -->
       <div id="cropTopBar" class="editor-header">
-        <button class="small-btn" onclick="switchTab('docs')">Cancel</button>
-        <button class="small-btn" onclick="autoDetectCorners()">Auto</button>
+        <button class="small-btn" onclick="cancelEditor()">Cancel</button>
+        <button class="small-btn" onclick="autoDetectCorners(false)">Auto</button>
         <button class="small-btn" onclick="resetFullCorners()">Full</button>
         <button class="small-btn" onclick="rotateImage()">Rotate</button>
         <button class="small-btn primary" onclick="applyPerspectiveCrop()">Straighten</button>
@@ -73,32 +82,41 @@
       <div id="filterTopBar" class="editor-header hidden">
         <button class="small-btn" onclick="backToCropMode()">Re-Crop</button>
         <button class="small-btn" onclick="runOcrFromEditor()">OCR Text</button>
-        <button class="small-btn primary" onclick="saveEditedDoc()">Save Scan</button>
+        <button id="saveScanBtn" class="small-btn primary" onclick="saveEditedDoc()">Save Scan</button>
       </div>
 
-      <!-- Full-Fit Responsive Stage (Poori Image Bina Kate Dikhegi) -->
+      <!-- Zoom Control Strip -->
+      <div id="zoomBar" class="zoom-bar">
+        <span class="zoom-title">Zoom (Pinch / Buttons):</span>
+        <div class="zoom-btns">
+          <button class="small-btn" onclick="stepZoom(-0.5)">-</button>
+          <button id="zoomLabel" class="small-btn" onclick="resetZoom()">100%</button>
+          <button class="small-btn" onclick="stepZoom(0.5)">+</button>
+        </div>
+      </div>
+
+      <!-- Full-Fit Responsive Stage -->
       <div id="canvasStage" class="canvas-stage">
         <canvas id="editorCanvas"></canvas>
         <div id="editorEmptyHint" class="empty-hint">
-          Pehle Documents tab se Camera ya Gallery photo chunein.
+          Pehle Documents tab se Camera, Gallery ya kisi saved photo par Edit dabayein.
         </div>
       </div>
 
       <!-- Bottom Hint for Crop Mode -->
       <div id="cropBottomHint" class="crop-hint">
-        4 konon (dots) ko kheench kar tedhe page par set karein, fir <strong>Straighten</strong> dabayein.
+        4 gol dots se kone set karein, 4 side sliders se border khiskayein, fir <strong>Straighten</strong> dabayein.
       </div>
 
-      <!-- Bottom Filter Strip for Step 2 -->
+      <!-- Bottom Filter Strip for Step 2 (Lighten & Sky Blue hata diye gaye hain) -->
       <div id="filterStrip" class="filter-strip hidden">
-        <button class="filter-chip active" onclick="setFilter('original', this)">Color</button>
-        <button class="filter-chip" onclick="setFilter('magic', this)">Auto Enhance</button>
-        <button class="filter-chip" onclick="setFilter('bw', this)">B/W Crisp</button>
-        <button class="filter-chip" onclick="setFilter('grey', this)">Grey</button>
-        <button class="filter-chip" onclick="setFilter('skyblue', this)">Sky Blue</button>
-        <button class="filter-chip" onclick="setFilter('lighten', this)">Lighten</button>
-        <button class="filter-chip" onclick="setFilter('dark', this)">Dark</button>
-        <button class="filter-chip" onclick="setFilter('denoise', this)">Remove Grain</button>
+        <button class="filter-chip active" data-filter="color" onclick="setFilter('color', this)">Color</button>
+        <button class="filter-chip" data-filter="original" onclick="setFilter('original', this)">Original</button>
+        <button class="filter-chip" data-filter="magic" onclick="setFilter('magic', this)">Auto Enhance</button>
+        <button class="filter-chip" data-filter="bw" onclick="setFilter('bw', this)">B/W Crisp</button>
+        <button class="filter-chip" data-filter="grey" onclick="setFilter('grey', this)">Grey</button>
+        <button class="filter-chip" data-filter="dark" onclick="setFilter('dark', this)">Dark</button>
+        <button class="filter-chip" data-filter="denoise" onclick="setFilter('denoise', this)">Remove Grain</button>
       </div>
     </section>
 
