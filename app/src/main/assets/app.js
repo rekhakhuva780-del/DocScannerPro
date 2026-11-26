@@ -5,26 +5,47 @@ let folderStack = [{ id: "root", name: "Home" }];
 let flashOn = false;
 let lastGeneratedQr = "";
 
-// ===== EDITOR & 4-CORNER PERSPECTIVE STATE =====
+// ===== EDITOR, RE-EDIT & BATCH GALLERY STATE =====
 let sourceImg = null;
+let currentOrigDataUrl = "";
+let editingDocId = null;
+let editingDocMeta = null;
+
+let batchEditQueue = [];
+let batchEditIndex = -1;
+
 let rotationDeg = 0;
 let editorMode = "crop"; // "crop" | "filter"
-let currentFilter = "original";
+let currentFilter = "color";
 
-// Offscreen working canvases
+// Zoom & Pan State
+let viewZoom = 1.0;
+let viewPanX = 0;
+let viewPanY = 0;
+let imgDrawRect = { x: 0, y: 0, w: 1, h: 1 };
+
+// Offscreen Canvases
 let rotCanvas = document.createElement("canvas");
 let warpedCanvas = document.createElement("canvas");
 let filteredCanvas = document.createElement("canvas");
 
-// 4 normalized corners on rotCanvas: [TL, TR, BR, BL]
+// 4 Normalized Corners on rotCanvas: [TL, TR, BR, BL]
 let cropCorners = [
   { x: 0.08, y: 0.08 },
   { x: 0.92, y: 0.08 },
   { x: 0.92, y: 0.92 },
   { x: 0.08, y: 0.92 }
 ];
-let activeCornerIdx = -1;
-let imgDrawRect = { x: 0, y: 0, w: 1, h: 1 }; // Where current image sits inside #editorCanvas (CSS px)
+
+// Active Touch / Drag State
+let dragMode = null; // "corner" | "edge" | "pan" | "pinch"
+let activeHandleIdx = -1;
+let dragStartCanvas = { x: 0, y: 0 };
+let dragStartNorm = { x: 0, y: 0 };
+let dragStartEdgePts = null;
+let panStartOffset = { x: 0, y: 0 };
+let pinchStartDist = 0;
+let pinchStartZoom = 1;
 
 const PDF_SIZES = {
   A1: [1684, 2384],
@@ -109,7 +130,7 @@ function notify(msg) {
   else alert(msg);
 }
 
-// ===== 3. FOLDERS & DOCUMENTS =====
+// ===== 3. FOLDERS & DOCUMENTS (WITH RE-EDIT OPTION) =====
 async function createFolderPrompt() {
   const name = prompt("Naya Folder / Subfolder ka naam likhein:");
   if (!name || !name.trim()) return;
@@ -182,12 +203,13 @@ async function loadFolderContents() {
     const card = document.createElement("div");
     card.className = "doc-card";
     card.innerHTML = `
-      <img src="${doc.dataUrl}" alt="${doc.name}" />
+      <img src="${doc.dataUrl}" alt="${doc.name}" onclick="editSavedDoc('${doc.id}', false)" />
       <div class="doc-meta">
         <p>${doc.name}</p>
         <div class="doc-actions">
-          <button class="small-btn" onclick="exportSingleJpg('${doc.id}', 'save')">JPG</button>
+          <button class="small-btn primary" onclick="editSavedDoc('${doc.id}', false)">Edit</button>
           <button class="small-btn" onclick="runOcrFromDoc('${doc.id}')">OCR</button>
+          <button class="small-btn" onclick="exportSingleJpg('${doc.id}', 'save')">JPG</button>
           <button class="small-btn" onclick="exportSingleJpg('${doc.id}', 'share')">Share</button>
           <button class="small-btn" onclick="deleteDoc('${doc.id}')">Del</button>
         </div>
@@ -197,32 +219,112 @@ async function loadFolderContents() {
   });
 }
 
-// ===== 4. IMAGE LOADING & 4-CORNER PERSPECTIVE EDITOR =====
+// ===== 4. IMAGE LOADING, GALLERY BATCH EDIT & RE-EDIT =====
 function handleImageInput(event) {
   const files = Array.from(event.target.files || []);
   event.target.value = "";
   if (files.length === 0) return;
 
   if (files.length === 1) {
-    loadFileIntoEditor(files[0]);
+    clearBatchState();
+    editingDocId = null;
+    editingDocMeta = null;
+    readAndCompressFile(files[0]).then((dataUrl) => {
+      openImageInEditor(dataUrl);
+    });
   } else {
-    batchImportImages(files);
+    batchImportAndEdit(files);
   }
 }
 
-async function batchImportImages(files) {
+async function batchImportAndEdit(files) {
+  notify(files.length + " photos import ho rahi hain...");
+  const newIds = [];
+  const baseTime = Date.now();
+
   for (let i = 0; i < files.length; i++) {
     const dataUrl = await readAndCompressFile(files[i]);
+    const docId = "doc_" + baseTime + "_" + i;
     await dbPut("docs", {
-      id: "doc_" + Date.now() + "_" + i,
+      id: docId,
       folderId: currentFolderId,
       name: "Scan_" + (i + 1) + ".jpg",
       dataUrl,
-      createdAt: Date.now() + i
+      origDataUrl: dataUrl,
+      createdAt: baseTime + i
     });
+    newIds.push(docId);
   }
-  notify(files.length + " images import ho gayi! Ab Save PDF dabayein.");
+
+  await loadFolderContents();
+  batchEditQueue = newIds;
+  batchEditIndex = 0;
+  notify("Sabhi photos save ho gayi! Ab ek-ek karke crop aur enhance karein.");
+  await editSavedDoc(batchEditQueue[0], true);
+}
+
+async function editSavedDoc(docId, fromBatch = false) {
+  if (!fromBatch) clearBatchState();
+  const allDocs = await dbGetAll("docs");
+  const doc = allDocs.find((d) => d.id === docId);
+  if (!doc) return;
+
+  editingDocId = doc.id;
+  editingDocMeta = doc;
+  const srcUrl = doc.origDataUrl || doc.dataUrl;
+  openImageInEditor(srcUrl);
+  updateBatchUI();
+}
+
+function clearBatchState() {
+  batchEditQueue = [];
+  batchEditIndex = -1;
+  updateBatchUI();
+}
+
+function updateBatchUI() {
+  const bar = document.getElementById("batchBar");
+  const label = document.getElementById("batchLabel");
+  const saveBtn = document.getElementById("saveScanBtn");
+
+  if (batchEditQueue.length > 0 && batchEditIndex >= 0) {
+    bar.classList.remove("hidden");
+    const cur = batchEditIndex + 1;
+    const tot = batchEditQueue.length;
+    label.textContent = `Gallery Edit: ${cur} / ${tot}`;
+    saveBtn.textContent = cur < tot ? `Save & Next (${cur}/${tot})` : "Save & Finish";
+  } else {
+    bar.classList.add("hidden");
+    saveBtn.textContent = editingDocId ? "Update Scan" : "Save Scan";
+  }
+}
+
+async function skipBatchItem() {
+  if (batchEditQueue.length === 0) return;
+  if (batchEditIndex + 1 < batchEditQueue.length) {
+    batchEditIndex++;
+    await editSavedDoc(batchEditQueue[batchEditIndex], true);
+  } else {
+    exitBatchEdit();
+  }
+}
+
+function exitBatchEdit() {
+  clearBatchState();
+  editingDocId = null;
+  editingDocMeta = null;
+  switchTab("docs");
   loadFolderContents();
+}
+
+function cancelEditor() {
+  if (batchEditQueue.length > 0) {
+    exitBatchEdit();
+  } else {
+    editingDocId = null;
+    editingDocMeta = null;
+    switchTab("docs");
+  }
 }
 
 function readAndCompressFile(file) {
@@ -249,23 +351,29 @@ function readAndCompressFile(file) {
   });
 }
 
-function loadFileIntoEditor(file) {
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    const img = new Image();
-    img.onload = () => {
-      sourceImg = img;
-      rotationDeg = 0;
-      currentFilter = "original";
-      document.getElementById("editorEmptyHint").classList.add("hidden");
-      rebuildRotatedCanvas();
-      autoDetectCorners(true);
-      setEditorMode("crop");
-      switchTab("editor");
-    };
-    img.src = e.target.result;
+function openImageInEditor(dataUrl) {
+  const img = new Image();
+  img.onload = () => {
+    sourceImg = img;
+    currentOrigDataUrl = dataUrl;
+    rotationDeg = 0;
+    currentFilter = "color";
+    syncFilterChipUI("color");
+    resetZoom(false);
+    document.getElementById("editorEmptyHint").classList.add("hidden");
+    rebuildRotatedCanvas();
+    autoDetectCorners(true);
+    setEditorMode("crop");
+    switchTab("editor");
+    updateBatchUI();
   };
-  reader.readAsDataURL(file);
+  img.src = dataUrl;
+}
+
+function syncFilterChipUI(filterName) {
+  document.querySelectorAll(".filter-chip").forEach((b) => {
+    b.classList.toggle("active", b.dataset.filter === filterName);
+  });
 }
 
 function rebuildRotatedCanvas() {
@@ -290,17 +398,20 @@ function rebuildRotatedCanvas() {
 function rotateImage() {
   if (!sourceImg) return;
   rotationDeg = (rotationDeg + 90) % 360;
+  resetZoom(false);
   rebuildRotatedCanvas();
-  resetFullCorners();
+  autoDetectCorners(true);
 }
 
 function setEditorMode(mode) {
   editorMode = mode;
+  resetZoom(false);
   const isCrop = mode === "crop";
   document.getElementById("cropTopBar").classList.toggle("hidden", !isCrop);
   document.getElementById("cropBottomHint").classList.toggle("hidden", !isCrop);
   document.getElementById("filterTopBar").classList.toggle("hidden", isCrop);
   document.getElementById("filterStrip").classList.toggle("hidden", isCrop);
+  updateBatchUI();
   requestAnimationFrame(() => drawEditorStage());
 }
 
@@ -318,62 +429,322 @@ function resetFullCorners() {
   drawEditorStage();
 }
 
-// Auto-detect tilted document corners (finds 4 extreme corners of bright paper region)
+// ===== 5. ZOOM CONTROLS =====
+function stepZoom(delta) {
+  if (!sourceImg) return;
+  viewZoom = Math.max(1.0, Math.min(4.0, +(viewZoom + delta).toFixed(2)));
+  if (viewZoom <= 1.01) {
+    viewZoom = 1.0;
+    viewPanX = 0;
+    viewPanY = 0;
+  }
+  updateZoomLabel();
+  drawEditorStage();
+}
+
+function resetZoom(redraw = true) {
+  viewZoom = 1.0;
+  viewPanX = 0;
+  viewPanY = 0;
+  updateZoomLabel();
+  if (redraw) drawEditorStage();
+}
+
+function updateZoomLabel() {
+  const lbl = document.getElementById("zoomLabel");
+  if (lbl) lbl.textContent = Math.round(viewZoom * 100) + "%";
+}
+
+// ===== 6. IMPROVED SMART AUTO-CROP (OTSU + CONNECTED COMPONENT + CONVEX HULL MAX-QUAD) =====
 function autoDetectCorners(silent = false) {
   if (!sourceImg || !rotCanvas.width) return;
-  const sw = 200;
-  const sh = Math.max(60, Math.round((rotCanvas.height / rotCanvas.width) * sw));
+
+  const sw = 240;
+  const sh = Math.max(80, Math.round((rotCanvas.height / rotCanvas.width) * sw));
   const tmp = document.createElement("canvas");
   tmp.width = sw;
   tmp.height = sh;
   const tctx = tmp.getContext("2d");
   tctx.drawImage(rotCanvas, 0, 0, sw, sh);
-  const d = tctx.getImageData(0, 0, sw, sh).data;
+  const rgba = tctx.getImageData(0, 0, sw, sh).data;
 
-  // Estimate average brightness
-  let lumSum = 0;
-  for (let i = 0; i < d.length; i += 4) {
-    lumSum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+  // Step 1: Paper-likeness score (high brightness + low color saturation)
+  const rawScore = new Uint8Array(sw * sh);
+  for (let i = 0, p = 0; i < rgba.length; i += 4, p++) {
+    const r = rgba[i], g = rgba[i + 1], b = rgba[i + 2];
+    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+    const sat = Math.max(r, g, b) - Math.min(r, g, b);
+    rawScore[p] = Math.max(0, Math.min(255, Math.round(lum - 0.42 * sat)));
   }
-  const threshold = Math.max(110, Math.min(185, lumSum / (sw * sh) + 12));
 
-  let tl = null, tr = null, br = null, bl = null;
-  let minSum = Infinity, maxDiff = -Infinity, maxSum = -Infinity, minDiff = Infinity;
-  let count = 0;
+  // Step 2: 3x3 Box Blur to remove text/grain inside paper
+  const blur = new Uint8Array(sw * sh);
+  for (let y = 1; y < sh - 1; y++) {
+    for (let x = 1; x < sw - 1; x++) {
+      let s = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        const row = (y + dy) * sw;
+        s += rawScore[row + x - 1] + rawScore[row + x] + rawScore[row + x + 1];
+      }
+      blur[y * sw + x] = (s / 9) | 0;
+    }
+  }
 
-  for (let y = 3; y < sh - 3; y++) {
-    for (let x = 3; x < sw - 3; x++) {
-      const idx = (y * sw + x) * 4;
-      const lum = 0.299 * d[idx] + 0.587 * d[idx + 1] + 0.114 * d[idx + 2];
-      if (lum > threshold) {
-        count++;
-        const s = x + y;
-        const diff = x - y;
-        if (s < minSum) { minSum = s; tl = { x: x / sw, y: y / sh }; }
-        if (diff > maxDiff) { maxDiff = diff; tr = { x: x / sw, y: y / sh }; }
-        if (s > maxSum) { maxSum = s; br = { x: x / sw, y: y / sh }; }
-        if (diff < minDiff) { minDiff = diff; bl = { x: x / sw, y: y / sh }; }
+  // Step 3: Otsu automatic threshold
+  const hist = new Int32Array(256);
+  const total = (sw - 2) * (sh - 2);
+  for (let y = 1; y < sh - 1; y++) {
+    for (let x = 1; x < sw - 1; x++) {
+      hist[blur[y * sw + x]]++;
+    }
+  }
+  let sumAll = 0;
+  for (let t = 0; t < 256; t++) sumAll += t * hist[t];
+  let sumB = 0, wB = 0, maxVar = -1, otsuThresh = 128;
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t];
+    if (wB === 0) continue;
+    const wF = total - wB;
+    if (wF === 0) break;
+    sumB += t * hist[t];
+    const mB = sumB / wB;
+    const mF = (sumAll - sumB) / wF;
+    const between = wB * wF * (mB - mF) * (mB - mF);
+    if (between > maxVar) {
+      maxVar = between;
+      otsuThresh = t;
+    }
+  }
+
+  // Step 4: Binary mask + Morphological Closing (dilate -> erode) to fill dark text gaps
+  let mask = new Uint8Array(sw * sh);
+  for (let i = 0; i < sw * sh; i++) {
+    mask[i] = blur[i] >= otsuThresh ? 1 : 0;
+  }
+  mask = morphPass(mask, sw, sh, 1); // dilate
+  mask = morphPass(mask, sw, sh, 0); // erode
+
+  // Step 5: Connected Component Labeling -> pick best paper region
+  const visited = new Uint8Array(sw * sh);
+  const queue = new Int32Array(sw * sh);
+  let bestScore = -1;
+  let bestBoundary = null;
+
+  for (let y = 1; y < sh - 1; y++) {
+    for (let x = 1; x < sw - 1; x++) {
+      const start = y * sw + x;
+      if (!mask[start] || visited[start]) continue;
+
+      let head = 0, tail = 0;
+      queue[tail++] = start;
+      visited[start] = 1;
+
+      let area = 0, sumX = 0, sumY = 0;
+      const boundary = [];
+
+      while (head < tail) {
+        const idx = queue[head++];
+        const cx = idx % sw;
+        const cy = (idx / sw) | 0;
+        area++;
+        sumX += cx;
+        sumY += cy;
+
+        let isEdge = false;
+        const neighbors = [idx - 1, idx + 1, idx - sw, idx + sw];
+        for (let k = 0; k < 4; k++) {
+          const nIdx = neighbors[k];
+          const nx = nIdx % sw;
+          const ny = (nIdx / sw) | 0;
+          if (nx <= 0 || nx >= sw - 1 || ny <= 0 || ny >= sh - 1 || !mask[nIdx]) {
+            isEdge = true;
+          } else if (!visited[nIdx]) {
+            visited[nIdx] = 1;
+            queue[tail++] = nIdx;
+          }
+        }
+        if (isEdge) boundary.push({ x: cx, y: cy });
+      }
+
+      const ratio = area / (sw * sh);
+      if (ratio < 0.07 || ratio > 0.96) continue;
+
+      const meanX = sumX / area;
+      const meanY = sumY / area;
+      const distCenter = Math.hypot((meanX - sw / 2) / sw, (meanY - sh / 2) / sh);
+      const score = area * (1.25 - 0.65 * distCenter);
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestBoundary = boundary;
       }
     }
   }
 
-  const areaRatio = count / (sw * sh);
-  if (tl && tr && br && bl && areaRatio > 0.1 && areaRatio < 0.94) {
-    cropCorners = [tl, tr, br, bl];
-    if (!silent) notify("4 konon ka auto-detect ho gaya");
+  let detected = null;
+  if (bestBoundary && bestBoundary.length >= 12) {
+    let hull = computeConvexHull(bestBoundary);
+    if (hull.length >= 4) {
+      // Reduce hull to max 22 vertices keeping true sharp corners
+      hull = simplifyHullToMax(hull, 22);
+      const quad = findMaxAreaQuad(hull);
+      if (quad) {
+        const ordered = orderQuadClockwise(quad);
+        detected = ordered.map((pt) => ({
+          x: Math.max(0.01, Math.min(0.99, pt.x / sw)),
+          y: Math.max(0.01, Math.min(0.99, pt.y / sh))
+        }));
+      }
+    }
+  }
+
+  if (detected) {
+    cropCorners = detected;
+    if (!silent) notify("Paper ke 4 kone auto-detect ho gaye!");
   } else {
     cropCorners = [
-      { x: 0.08, y: 0.08 },
-      { x: 0.92, y: 0.08 },
-      { x: 0.92, y: 0.92 },
-      { x: 0.08, y: 0.92 }
+      { x: 0.07, y: 0.07 },
+      { x: 0.93, y: 0.07 },
+      { x: 0.93, y: 0.93 },
+      { x: 0.07, y: 0.93 }
     ];
-    if (!silent) notify("Konon ko ungli se paper par set karein");
+    if (!silent) notify("Kone clear nahi mile — 4 dots ya side sliders se set karein.");
   }
   drawEditorStage();
 }
 
-// ===== FULL-FIT CANVAS RENDERER (POORI IMAGE HAMESHA DIKHEGI) =====
+function morphPass(src, w, h, targetVal) {
+  const out = new Uint8Array(src.length);
+  const fillVal = targetVal ? 1 : 0;
+  const invVal = targetVal ? 0 : 1;
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      let found = false;
+      for (let dy = -1; dy <= 1 && !found; dy++) {
+        const row = (y + dy) * w;
+        for (let dx = -1; dx <= 1; dx++) {
+          if (src[row + x + dx] === fillVal) {
+            found = true;
+            break;
+          }
+        }
+      }
+      out[y * w + x] = found ? fillVal : invVal;
+    }
+  }
+  return out;
+}
+
+function computeConvexHull(points) {
+  const pts = points.slice().sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
+  const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+
+  const lower = [];
+  for (const p of pts) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) {
+      lower.pop();
+    }
+    lower.push(p);
+  }
+  const upper = [];
+  for (let i = pts.length - 1; i >= 0; i--) {
+    const p = pts[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) {
+      upper.pop();
+    }
+    upper.push(p);
+  }
+  lower.pop();
+  upper.pop();
+  return lower.concat(upper);
+}
+
+function simplifyHullToMax(hull, maxN) {
+  const pts = hull.slice();
+  const triArea = (a, b, c) => Math.abs((a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y)) * 0.5);
+
+  while (pts.length > maxN) {
+    let minA = Infinity;
+    let minIdx = 0;
+    const n = pts.length;
+    for (let i = 0; i < n; i++) {
+      const a = triArea(pts[(i - 1 + n) % n], pts[i], pts[(i + 1) % n]);
+      if (a < minA) {
+        minA = a;
+        minIdx = i;
+      }
+    }
+    pts.splice(minIdx, 1);
+  }
+  return pts;
+}
+
+function findMaxAreaQuad(hull) {
+  const n = hull.length;
+  if (n < 4) return null;
+  const triArea = (a, b, c) => Math.abs((a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y)) * 0.5);
+
+  let bestArea = -1;
+  let best = null;
+  for (let a = 0; a < n - 3; a++) {
+    for (let b = a + 1; b < n - 2; b++) {
+      for (let c = b + 1; c < n - 1; c++) {
+        const area1 = triArea(hull[a], hull[b], hull[c]);
+        for (let d = c + 1; d < n; d++) {
+          const totalArea = area1 + triArea(hull[a], hull[c], hull[d]);
+          if (totalArea > bestArea) {
+            bestArea = totalArea;
+            best = [hull[a], hull[b], hull[c], hull[d]];
+          }
+        }
+      }
+    }
+  }
+  return best;
+}
+
+function orderQuadClockwise(pts) {
+  const cx = (pts[0].x + pts[1].x + pts[2].x + pts[3].x) / 4;
+  const cy = (pts[0].y + pts[1].y + pts[2].y + pts[3].y) / 4;
+  const sorted = pts.slice().sort((a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
+
+  // Rotate so top-left (min x + y) is index 0
+  let tlIdx = 0;
+  let minSum = Infinity;
+  for (let i = 0; i < 4; i++) {
+    const s = sorted[i].x + sorted[i].y;
+    if (s < minSum) {
+      minSum = s;
+      tlIdx = i;
+    }
+  }
+  const ordered = [
+    sorted[tlIdx],
+    sorted[(tlIdx + 1) % 4],
+    sorted[(tlIdx + 2) % 4],
+    sorted[(tlIdx + 3) % 4]
+  ];
+
+  // Ensure clockwise orientation in screen space (Y down): TL -> TR -> BR -> BL
+  const cross =
+    (ordered[1].x - ordered[0].x) * (ordered[2].y - ordered[0].y) -
+    (ordered[1].y - ordered[0].y) * (ordered[2].x - ordered[0].x);
+  if (cross < 0) {
+    return [ordered[0], ordered[3], ordered[2], ordered[1]];
+  }
+  return ordered;
+}
+
+// ===== 7. CANVAS STAGE WITH ZOOM, 4 CORNERS + 4 SIDE SLIDER HANDLES =====
+function getEdgeMidpoints(pts) {
+  return [
+    { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2, ang: Math.atan2(pts[1].y - pts[0].y, pts[1].x - pts[0].x) },
+    { x: (pts[1].x + pts[2].x) / 2, y: (pts[1].y + pts[2].y) / 2, ang: Math.atan2(pts[2].y - pts[1].y, pts[2].x - pts[1].x) },
+    { x: (pts[2].x + pts[3].x) / 2, y: (pts[2].y + pts[3].y) / 2, ang: Math.atan2(pts[3].y - pts[2].y, pts[3].x - pts[2].x) },
+    { x: (pts[3].x + pts[0].x) / 2, y: (pts[3].y + pts[0].y) / 2, ang: Math.atan2(pts[0].y - pts[3].y, pts[0].x - pts[3].x) }
+  ];
+}
+
 function drawEditorStage() {
   const stage = document.getElementById("canvasStage");
   const canvas = document.getElementById("editorCanvas");
@@ -393,29 +764,33 @@ function drawEditorStage() {
   const imgSrc = editorMode === "crop" ? rotCanvas : filteredCanvas;
   if (!sourceImg || !imgSrc.width || !imgSrc.height) return;
 
-  // 26px margin around image so handles at corners are super easy to grab
   const pad = editorMode === "crop" ? 26 : 12;
   const availW = Math.max(20, cssW - pad * 2);
   const availH = Math.max(20, cssH - pad * 2);
   const fitScale = Math.min(availW / imgSrc.width, availH / imgSrc.height);
 
-  const drawW = imgSrc.width * fitScale;
-  const drawH = imgSrc.height * fitScale;
-  const drawX = (cssW - drawW) / 2;
-  const drawY = (cssH - drawH) / 2;
+  const drawW = imgSrc.width * fitScale * viewZoom;
+  const drawH = imgSrc.height * fitScale * viewZoom;
+
+  const maxPanX = Math.max(0, (drawW - cssW) / 2 + pad);
+  const maxPanY = Math.max(0, (drawH - cssH) / 2 + pad);
+  viewPanX = Math.max(-maxPanX, Math.min(maxPanX, viewPanX));
+  viewPanY = Math.max(-maxPanY, Math.min(maxPanY, viewPanY));
+
+  const drawX = (cssW - drawW) / 2 + viewPanX;
+  const drawY = (cssH - drawH) / 2 + viewPanY;
   imgDrawRect = { x: drawX, y: drawY, w: drawW, h: drawH };
 
   ctx.drawImage(imgSrc, drawX, drawY, drawW, drawH);
 
   if (editorMode !== "crop") return;
 
-  // Convert normalized corners to canvas CSS coordinates
   const pts = cropCorners.map((c) => ({
     x: drawX + c.x * drawW,
     y: drawY + c.y * drawH
   }));
 
-  // Dim outside the selected quadrilateral
+  // Dim outside selected quad
   ctx.save();
   ctx.fillStyle = "rgba(2, 6, 23, 0.55)";
   ctx.beginPath();
@@ -428,7 +803,7 @@ function drawEditorStage() {
   ctx.fill("evenodd");
   ctx.restore();
 
-  // Draw bright polygon outline
+  // Polygon border
   ctx.save();
   ctx.strokeStyle = "#38bdf8";
   ctx.lineWidth = 2.5;
@@ -438,12 +813,32 @@ function drawEditorStage() {
   ctx.closePath();
   ctx.stroke();
 
-  // Draw 4 large draggable handles
-  pts.forEach((p, idx) => {
-    const isActive = idx === activeCornerIdx;
+  // 4 Side Slider Handles (Pill bars on Top, Right, Bottom, Left edges)
+  const mids = getEdgeMidpoints(pts);
+  mids.forEach((m, idx) => {
+    const isActive = dragMode === "edge" && activeHandleIdx === idx;
+    ctx.save();
+    ctx.translate(m.x, m.y);
+    ctx.rotate(m.ang);
+    const barW = isActive ? 32 : 26;
+    const barH = isActive ? 12 : 10;
+    const r = barH / 2;
     ctx.beginPath();
-    ctx.arc(p.x, p.y, isActive ? 16 : 13, 0, Math.PI * 2);
-    ctx.fillStyle = isActive ? "#facc15" : "rgba(14, 165, 233, 0.85)";
+    ctx.roundRect(-barW / 2, -barH / 2, barW, barH, r);
+    ctx.fillStyle = isActive ? "#facc15" : "#0ea5e9";
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "#ffffff";
+    ctx.stroke();
+    ctx.restore();
+  });
+
+  // 4 Corner Handles (Circles)
+  pts.forEach((p, idx) => {
+    const isActive = dragMode === "corner" && activeHandleIdx === idx;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, isActive ? 15 : 12, 0, Math.PI * 2);
+    ctx.fillStyle = isActive ? "#facc15" : "rgba(14, 165, 233, 0.9)";
     ctx.fill();
     ctx.lineWidth = 2.5;
     ctx.strokeStyle = "#ffffff";
@@ -451,16 +846,24 @@ function drawEditorStage() {
   });
   ctx.restore();
 
-  // Draw Magnifier Loupe while dragging a corner so finger doesn't hide the corner
-  if (activeCornerIdx >= 0) {
-    drawMagnifierLoupe(ctx, cssW, cropCorners[activeCornerIdx]);
+  // Magnifier Loupe when dragging corner or side slider
+  if ((dragMode === "corner" || dragMode === "edge") && activeHandleIdx >= 0) {
+    let focusNorm;
+    if (dragMode === "corner") {
+      focusNorm = cropCorners[activeHandleIdx];
+    } else {
+      const a = cropCorners[activeHandleIdx];
+      const b = cropCorners[(activeHandleIdx + 1) % 4];
+      focusNorm = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    }
+    drawMagnifierLoupe(ctx, cssW, focusNorm);
   }
 }
 
 function drawMagnifierLoupe(ctx, cssW, normPt) {
-  const radius = 48;
-  const cx = normPt.x < 0.5 ? cssW - radius - 14 : radius + 14;
-  const cy = radius + 14;
+  const radius = 46;
+  const cx = normPt.x < 0.5 ? cssW - radius - 12 : radius + 12;
+  const cy = radius + 12;
 
   const srcX = normPt.x * rotCanvas.width;
   const srcY = normPt.y * rotCanvas.height;
@@ -486,7 +889,6 @@ function drawMagnifierLoupe(ctx, cssW, normPt) {
     radius * 2
   );
 
-  // Crosshair inside magnifier
   ctx.strokeStyle = "#facc15";
   ctx.lineWidth = 1.5;
   ctx.beginPath();
@@ -497,7 +899,6 @@ function drawMagnifierLoupe(ctx, cssW, normPt) {
   ctx.stroke();
   ctx.restore();
 
-  // Outer border of magnifier
   ctx.save();
   ctx.beginPath();
   ctx.arc(cx, cy, radius, 0, Math.PI * 2);
@@ -507,67 +908,185 @@ function drawMagnifierLoupe(ctx, cssW, normPt) {
   ctx.restore();
 }
 
-// ===== TOUCH & POINTER DRAG HANDLERS FOR 4 CORNERS =====
-(function bindCropTouchEvents() {
+// ===== 8. TOUCH, PINCH-ZOOM, PAN, CORNER & SIDE-SLIDER GESTURES =====
+(function bindStageGestures() {
   const canvas = document.getElementById("editorCanvas");
 
-  function getCanvasPos(e) {
+  function getPos(touchLike) {
     const rect = canvas.getBoundingClientRect();
-    const touch = e.touches ? e.touches[0] : e;
     return {
-      x: touch.clientX - rect.left,
-      y: touch.clientY - rect.top
+      x: touchLike.clientX - rect.left,
+      y: touchLike.clientY - rect.top
     };
   }
 
-  function onStart(e) {
-    if (editorMode !== "crop" || !sourceImg) return;
-    const pos = getCanvasPos(e);
-    let bestIdx = -1;
-    let bestDist = 42; // Comfortable finger hit area
+  function onTouchStart(e) {
+    if (!sourceImg) return;
 
-    cropCorners.forEach((c, idx) => {
-      const px = imgDrawRect.x + c.x * imgDrawRect.w;
-      const py = imgDrawRect.y + c.y * imgDrawRect.h;
-      const dist = Math.hypot(pos.x - px, pos.y - py);
-      if (dist < bestDist) {
-        bestDist = dist;
-        bestIdx = idx;
-      }
-    });
-
-    if (bestIdx >= 0) {
+    // 2-finger Pinch-to-Zoom
+    if (e.touches && e.touches.length === 2) {
       e.preventDefault();
-      activeCornerIdx = bestIdx;
+      const p1 = getPos(e.touches[0]);
+      const p2 = getPos(e.touches[1]);
+      dragMode = "pinch";
+      activeHandleIdx = -1;
+      pinchStartDist = Math.hypot(p2.x - p1.x, p2.y - p1.y) || 1;
+      pinchStartZoom = viewZoom;
+      dragStartCanvas = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+      panStartOffset = { x: viewPanX, y: viewPanY };
+      return;
+    }
+
+    const pos = getPos(e.touches ? e.touches[0] : e);
+
+    if (editorMode === "crop") {
+      // 1. Check 4 Corner Handles
+      let bestCorner = -1, bestCDist = 34;
+      cropCorners.forEach((c, idx) => {
+        const px = imgDrawRect.x + c.x * imgDrawRect.w;
+        const py = imgDrawRect.y + c.y * imgDrawRect.h;
+        const d = Math.hypot(pos.x - px, pos.y - py);
+        if (d < bestCDist) {
+          bestCDist = d;
+          bestCorner = idx;
+        }
+      });
+
+      if (bestCorner >= 0) {
+        e.preventDefault();
+        dragMode = "corner";
+        activeHandleIdx = bestCorner;
+        drawEditorStage();
+        return;
+      }
+
+      // 2. Check 4 Side Slider Handles
+      const pts = cropCorners.map((c) => ({
+        x: imgDrawRect.x + c.x * imgDrawRect.w,
+        y: imgDrawRect.y + c.y * imgDrawRect.h
+      }));
+      const mids = getEdgeMidpoints(pts);
+      let bestEdge = -1, bestEDist = 32;
+      mids.forEach((m, idx) => {
+        const d = Math.hypot(pos.x - m.x, pos.y - m.y);
+        if (d < bestEDist) {
+          bestEDist = d;
+          bestEdge = idx;
+        }
+      });
+
+      if (bestEdge >= 0) {
+        e.preventDefault();
+        dragMode = "edge";
+        activeHandleIdx = bestEdge;
+        dragStartNorm = {
+          x: (pos.x - imgDrawRect.x) / imgDrawRect.w,
+          y: (pos.y - imgDrawRect.y) / imgDrawRect.h
+        };
+        const a = cropCorners[bestEdge];
+        const b = cropCorners[(bestEdge + 1) % 4];
+        dragStartEdgePts = [{ x: a.x, y: a.y }, { x: b.x, y: b.y }];
+        drawEditorStage();
+        return;
+      }
+    }
+
+    // 3. Pan when zoomed in
+    if (viewZoom > 1.01) {
+      e.preventDefault();
+      dragMode = "pan";
+      dragStartCanvas = pos;
+      panStartOffset = { x: viewPanX, y: viewPanY };
+    }
+  }
+
+  function onTouchMove(e) {
+    if (!dragMode || !sourceImg) return;
+
+    if (dragMode === "pinch" && e.touches && e.touches.length === 2) {
+      e.preventDefault();
+      const p1 = getPos(e.touches[0]);
+      const p2 = getPos(e.touches[1]);
+      const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y) || 1;
+      const mid = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+
+      viewZoom = Math.max(1.0, Math.min(4.0, pinchStartZoom * (dist / pinchStartDist)));
+      viewPanX = panStartOffset.x + (mid.x - dragStartCanvas.x);
+      viewPanY = panStartOffset.y + (mid.y - dragStartCanvas.y);
+      if (viewZoom <= 1.01) {
+        viewZoom = 1.0;
+        viewPanX = 0;
+        viewPanY = 0;
+      }
+      updateZoomLabel();
+      drawEditorStage();
+      return;
+    }
+
+    const pos = getPos(e.touches ? e.touches[0] : e);
+
+    if (dragMode === "corner" && activeHandleIdx >= 0) {
+      e.preventDefault();
+      const nx = Math.max(0, Math.min(1, (pos.x - imgDrawRect.x) / imgDrawRect.w));
+      const ny = Math.max(0, Math.min(1, (pos.y - imgDrawRect.y) / imgDrawRect.h));
+      cropCorners[activeHandleIdx] = { x: nx, y: ny };
+      drawEditorStage();
+    } else if (dragMode === "edge" && activeHandleIdx >= 0 && dragStartEdgePts) {
+      e.preventDefault();
+      const curNx = (pos.x - imgDrawRect.x) / imgDrawRect.w;
+      const curNy = (pos.y - imgDrawRect.y) / imgDrawRect.h;
+      const dx = curNx - dragStartNorm.x;
+      const dy = curNy - dragStartNorm.y;
+
+      const pA = dragStartEdgePts[0];
+      const pB = dragStartEdgePts[1];
+      const ex = pB.x - pA.x;
+      const ey = pB.y - pA.y;
+      const len = Math.hypot(ex, ey) || 1;
+
+      // Slide edge smoothly along its perpendicular normal
+      const nx = -ey / len;
+      const ny = ex / len;
+      const proj = dx * nx + dy * ny;
+      const shiftX = nx * proj;
+      const shiftY = ny * proj;
+
+      const idxA = activeHandleIdx;
+      const idxB = (activeHandleIdx + 1) % 4;
+      cropCorners[idxA] = {
+        x: Math.max(0, Math.min(1, pA.x + shiftX)),
+        y: Math.max(0, Math.min(1, pA.y + shiftY))
+      };
+      cropCorners[idxB] = {
+        x: Math.max(0, Math.min(1, pB.x + shiftX)),
+        y: Math.max(0, Math.min(1, pB.y + shiftY))
+      };
+      drawEditorStage();
+    } else if (dragMode === "pan") {
+      e.preventDefault();
+      viewPanX = panStartOffset.x + (pos.x - dragStartCanvas.x);
+      viewPanY = panStartOffset.y + (pos.y - dragStartCanvas.y);
       drawEditorStage();
     }
   }
 
-  function onMove(e) {
-    if (activeCornerIdx < 0 || editorMode !== "crop") return;
-    e.preventDefault();
-    const pos = getCanvasPos(e);
-    const nx = Math.max(0, Math.min(1, (pos.x - imgDrawRect.x) / imgDrawRect.w));
-    const ny = Math.max(0, Math.min(1, (pos.y - imgDrawRect.y) / imgDrawRect.h));
-    cropCorners[activeCornerIdx] = { x: nx, y: ny };
-    drawEditorStage();
-  }
-
-  function onEnd() {
-    if (activeCornerIdx >= 0) {
-      activeCornerIdx = -1;
+  function onTouchEnd() {
+    if (dragMode) {
+      dragMode = null;
+      activeHandleIdx = -1;
+      dragStartEdgePts = null;
       drawEditorStage();
     }
   }
 
-  canvas.addEventListener("touchstart", onStart, { passive: false });
-  canvas.addEventListener("touchmove", onMove, { passive: false });
-  canvas.addEventListener("touchend", onEnd);
-  canvas.addEventListener("touchcancel", onEnd);
+  canvas.addEventListener("touchstart", onTouchStart, { passive: false });
+  canvas.addEventListener("touchmove", onTouchMove, { passive: false });
+  canvas.addEventListener("touchend", onTouchEnd);
+  canvas.addEventListener("touchcancel", onTouchEnd);
 
-  canvas.addEventListener("mousedown", onStart);
-  window.addEventListener("mousemove", onMove);
-  window.addEventListener("mouseup", onEnd);
+  canvas.addEventListener("mousedown", onTouchStart);
+  window.addEventListener("mousemove", onTouchMove);
+  window.addEventListener("mouseup", onTouchEnd);
   window.addEventListener("resize", () => {
     if (document.getElementById("tab-editor").classList.contains("active")) {
       drawEditorStage();
@@ -575,20 +1094,18 @@ function drawMagnifierLoupe(ctx, cssW, normPt) {
   });
 })();
 
-// ===== 5. HOMOGRAPHY PERSPECTIVE WARP (TEDHI IMAGE KO SEEDHA KARNA) =====
+// ===== 9. HOMOGRAPHY PERSPECTIVE WARP =====
 function applyPerspectiveCrop() {
   if (!sourceImg || !rotCanvas.width) return;
 
   const srcW = rotCanvas.width;
   const srcH = rotCanvas.height;
 
-  // Source quadrilateral points in pixel coordinates: TL, TR, BR, BL
   const p0 = { x: cropCorners[0].x * srcW, y: cropCorners[0].y * srcH };
   const p1 = { x: cropCorners[1].x * srcW, y: cropCorners[1].y * srcH };
   const p2 = { x: cropCorners[2].x * srcW, y: cropCorners[2].y * srcH };
   const p3 = { x: cropCorners[3].x * srcW, y: cropCorners[3].y * srcH };
 
-  // Compute natural straightened width & height
   const widthTop = Math.hypot(p1.x - p0.x, p1.y - p0.y);
   const widthBot = Math.hypot(p2.x - p3.x, p2.y - p3.y);
   const heightLeft = Math.hypot(p3.x - p0.x, p3.y - p0.y);
@@ -597,7 +1114,6 @@ function applyPerspectiveCrop() {
   let dstW = Math.max(80, Math.round(Math.max(widthTop, widthBot)));
   let dstH = Math.max(80, Math.round(Math.max(heightLeft, heightRight)));
 
-  // Cap max dimension to 1400px for super fast mobile processing + sharp text
   const maxOut = 1400;
   if (dstW > maxOut || dstH > maxOut) {
     const r = Math.min(maxOut / dstW, maxOut / dstH);
@@ -605,15 +1121,13 @@ function applyPerspectiveCrop() {
     dstH = Math.round(dstH * r);
   }
 
-  // Solve inverse homography mapping destination rectangle -> source quad
   const dstPts = [
     { x: 0, y: 0 },
     { x: dstW - 1, y: 0 },
     { x: dstW - 1, y: dstH - 1 },
     { x: 0, y: dstH - 1 }
   ];
-  const srcPts = [p0, p1, p2, p3];
-  const H = computeHomography(dstPts, srcPts);
+  const H = computeHomography(dstPts, [p0, p1, p2, p3]);
 
   if (!H) {
     notify("Crop points sahi set karein (lines cross na hon)");
@@ -633,7 +1147,6 @@ function applyPerspectiveCrop() {
   const h3 = H[3], h4 = H[4], h5 = H[5];
   const h6 = H[6], h7 = H[7];
 
-  // Bilinear perspective mapping
   for (let v = 0; v < dstH; v++) {
     const rowOffset = v * dstW;
     const h1v_h2 = h1 * v + h2;
@@ -677,8 +1190,7 @@ function applyPerspectiveCrop() {
   }
 
   wctx.putImageData(outImg, 0, 0);
-
-  // Reset filter selection to original or keep current
+  syncFilterChipUI(currentFilter);
   applyCurrentFilterToWarped();
   setEditorMode("filter");
 }
@@ -700,18 +1212,15 @@ function computeHomography(fromPts, toPts) {
 function solveLinearSystem(A, b) {
   const n = b.length;
   const M = A.map((row, i) => [...row, b[i]]);
-
   for (let col = 0; col < n; col++) {
     let pivotRow = col;
     for (let r = col + 1; r < n; r++) {
       if (Math.abs(M[r][col]) > Math.abs(M[pivotRow][col])) pivotRow = r;
     }
     if (Math.abs(M[pivotRow][col]) < 1e-10) return null;
-
     [M[col], M[pivotRow]] = [M[pivotRow], M[col]];
     const pivot = M[col][col];
     for (let c = col; c <= n; c++) M[col][c] /= pivot;
-
     for (let r = 0; r < n; r++) {
       if (r === col) continue;
       const factor = M[r][col];
@@ -721,7 +1230,7 @@ function solveLinearSystem(A, b) {
   return M.map((row) => row[n]);
 }
 
-// ===== 6. FILTERS & SAVE =====
+// ===== 10. UPGRADED FILTERS (WHITE PAPER + RICH TEXT COLOR) =====
 function setFilter(filterName, btnEl) {
   currentFilter = filterName;
   document.querySelectorAll(".filter-chip").forEach((b) => b.classList.remove("active"));
@@ -742,9 +1251,113 @@ function applyCurrentFilterToWarped() {
   }
 }
 
+// Estimates local paper background so shadows & yellow light turn clean white
+function buildLocalBackgroundMap(canvas, w, h) {
+  const div = Math.max(12, Math.round(Math.max(w, h) / 46));
+  const bw = Math.max(8, Math.round(w / div));
+  const bh = Math.max(8, Math.round(h / div));
+
+  const smallC = document.createElement("canvas");
+  smallC.width = bw;
+  smallC.height = bh;
+  const sctx = smallC.getContext("2d");
+  sctx.drawImage(canvas, 0, 0, bw, bh);
+
+  const sImg = sctx.getImageData(0, 0, bw, bh);
+  const sd = sImg.data;
+  const copy = new Uint8ClampedArray(sd);
+
+  // 3x3 local maximum filter removes text from background estimation
+  for (let y = 0; y < bh; y++) {
+    for (let x = 0; x < bw; x++) {
+      let maxR = 0, maxG = 0, maxB = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        const yy = Math.max(0, Math.min(bh - 1, y + dy));
+        for (let dx = -1; dx <= 1; dx++) {
+          const xx = Math.max(0, Math.min(bw - 1, x + dx));
+          const ii = (yy * bw + xx) * 4;
+          if (copy[ii] > maxR) maxR = copy[ii];
+          if (copy[ii + 1] > maxG) maxG = copy[ii + 1];
+          if (copy[ii + 2] > maxB) maxB = copy[ii + 2];
+        }
+      }
+      const oi = (y * bw + x) * 4;
+      sd[oi] = maxR;
+      sd[oi + 1] = maxG;
+      sd[oi + 2] = maxB;
+    }
+  }
+  sctx.putImageData(sImg, 0, 0);
+
+  const bgC = document.createElement("canvas");
+  bgC.width = w;
+  bgC.height = h;
+  const bgCtx = bgC.getContext("2d");
+  bgCtx.imageSmoothingEnabled = true;
+  bgCtx.drawImage(smallC, 0, 0, w, h);
+  return bgCtx.getImageData(0, 0, w, h).data;
+}
+
 function applyPixelFilter(ctx, w, h, mode) {
   const imgData = ctx.getImageData(0, 0, w, h);
   const d = imgData.data;
+
+  // Shadow-removing white paper + rich color text modes
+  if (mode === "color" || mode === "bw" || mode === "grey") {
+    const bgD = buildLocalBackgroundMap(ctx.canvas, w, h);
+
+    for (let i = 0; i < d.length; i += 4) {
+      const br = Math.max(45, bgD[i]);
+      const bg = Math.max(45, bgD[i + 1]);
+      const bb = Math.max(45, bgD[i + 2]);
+
+      // Normalize against local paper color -> shadows & yellow cast become pure white
+      let r = (d[i] / br) * 255;
+      let g = (d[i + 1] / bg) * 255;
+      let b = (d[i + 2] / bb) * 255;
+
+      if (mode === "color") {
+        // Stretch paper near white, preserve & deepen text ink
+        r = ((r - 20) / (224 - 20)) * 255;
+        g = ((g - 20) / (224 - 20)) * 255;
+        b = ((b - 20) / (224 - 20)) * 255;
+        r = Math.max(0, Math.min(255, r));
+        g = Math.max(0, Math.min(255, g));
+        b = Math.max(0, Math.min(255, b));
+
+        const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+        if (lum >= 236) {
+          r = g = b = 255; // Pure clean white paper
+        } else {
+          // Boost text color vibrancy (blue pen, red stamp, colored headings)
+          const satBoost = 1.48;
+          r = lum + (r - lum) * satBoost;
+          g = lum + (g - lum) * satBoost;
+          b = lum + (b - lum) * satBoost;
+          // Make text slightly richer & bolder
+          const inkDepth = 0.85 + 0.15 * (lum / 236);
+          r *= inkDepth;
+          g *= inkDepth;
+          b *= inkDepth;
+        }
+      } else if (mode === "bw") {
+        const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+        const v = lum > 192 ? 255 : 0;
+        r = g = b = v;
+      } else if (mode === "grey") {
+        let lum = 0.299 * r + 0.587 * g + 0.114 * b;
+        lum = ((lum - 24) / (225 - 24)) * 255;
+        r = g = b = lum > 236 ? 255 : lum;
+      }
+
+      d[i] = Math.max(0, Math.min(255, r));
+      d[i + 1] = Math.max(0, Math.min(255, g));
+      d[i + 2] = Math.max(0, Math.min(255, b));
+    }
+
+    ctx.putImageData(imgData, 0, 0);
+    return;
+  }
 
   if (mode === "denoise") {
     const copy = new Uint8ClampedArray(d);
@@ -759,8 +1372,8 @@ function applyPixelFilter(ctx, w, h, mode) {
           }
           const avg = sum / 9;
           const idx = (y * w + x) * 4 + c;
-          let val = avg + (copy[idx] - avg) * 0.4;
-          val = (val - 128) * 1.25 + 138;
+          let val = avg + (copy[idx] - avg) * 0.45;
+          val = (val - 128) * 1.28 + 140;
           d[idx] = Math.max(0, Math.min(255, val));
         }
       }
@@ -771,29 +1384,15 @@ function applyPixelFilter(ctx, w, h, mode) {
 
   for (let i = 0; i < d.length; i += 4) {
     let r = d[i], g = d[i + 1], b = d[i + 2];
-    const grey = 0.299 * r + 0.587 * g + 0.114 * b;
 
     if (mode === "magic") {
-      r = (r - 115) * 1.45 + 135;
-      g = (g - 115) * 1.45 + 135;
-      b = (b - 115) * 1.45 + 135;
-    } else if (mode === "bw") {
-      const v = grey > 132 ? 255 : 0;
-      r = g = b = v;
-    } else if (mode === "grey") {
-      const v = (grey - 120) * 1.2 + 128;
-      r = g = b = v;
-    } else if (mode === "skyblue") {
-      const v = (grey - 110) * 1.3 + 128;
-      r = v * 0.85;
-      g = v * 0.96;
-      b = Math.min(255, v * 1.15 + 18);
-    } else if (mode === "lighten") {
-      r += 40; g += 40; b += 40;
+      r = (r - 115) * 1.45 + 138;
+      g = (g - 115) * 1.45 + 138;
+      b = (b - 115) * 1.45 + 138;
     } else if (mode === "dark") {
-      r = (r - 128) * 1.35 + 95;
-      g = (g - 128) * 1.35 + 95;
-      b = (b - 128) * 1.35 + 95;
+      r = (r - 128) * 1.4 + 92;
+      g = (g - 128) * 1.4 + 92;
+      b = (b - 128) * 1.4 + 92;
     }
 
     d[i] = Math.max(0, Math.min(255, r));
@@ -807,25 +1406,49 @@ async function saveEditedDoc() {
   if (!filteredCanvas.width) return notify("Pehle photo scan aur straighten karein");
   const dataUrl = filteredCanvas.toDataURL("image/jpeg", 0.92);
 
-  await dbPut("docs", {
-    id: "doc_" + Date.now(),
-    folderId: currentFolderId,
-    name: "Doc_" + new Date().toLocaleTimeString().replace(/[: ]/g, "_") + ".jpg",
-    dataUrl,
-    createdAt: Date.now()
-  });
+  if (editingDocId && editingDocMeta) {
+    await dbPut("docs", {
+      ...editingDocMeta,
+      dataUrl,
+      origDataUrl: editingDocMeta.origDataUrl || currentOrigDataUrl || dataUrl
+    });
+  } else {
+    await dbPut("docs", {
+      id: "doc_" + Date.now(),
+      folderId: currentFolderId,
+      name: "Doc_" + new Date().toLocaleTimeString().replace(/[: ]/g, "_") + ".jpg",
+      dataUrl,
+      origDataUrl: currentOrigDataUrl || dataUrl,
+      createdAt: Date.now()
+    });
+  }
 
-  notify("Straightened document save ho gaya!");
+  // If in Gallery Batch Edit mode, automatically open next photo
+  if (batchEditQueue.length > 0 && batchEditIndex >= 0) {
+    if (batchEditIndex + 1 < batchEditQueue.length) {
+      batchEditIndex++;
+      notify("Save ho gaya! Agli photo khul rahi hai...");
+      await editSavedDoc(batchEditQueue[batchEditIndex], true);
+      return;
+    } else {
+      notify("Sabhi gallery photos edit aur save ho gayi!");
+      exitBatchEdit();
+      return;
+    }
+  }
+
+  notify(editingDocId ? "Document update ho gaya!" : "Document save ho gaya!");
+  editingDocId = null;
+  editingDocMeta = null;
   switchTab("docs");
   loadFolderContents();
 }
 
-// ===== 7. OFFLINE OCR TEXT RECOGNITION =====
+// ===== 11. OFFLINE OCR TEXT RECOGNITION =====
 function handleOcrFileInput(event) {
   const file = event.target.files?.[0];
   event.target.value = "";
   if (!file) return;
-
   readAndCompressFile(file).then((dataUrl) => {
     triggerNativeOcr(dataUrl.split(",")[1]);
   });
@@ -871,7 +1494,7 @@ window.onNativeOcrResult = function (text, errorMsg) {
     statusEl.textContent = "Text mil gaya! Aap ise niche edit, copy ya share kar sakte hain.";
   } else {
     outEl.value = "";
-    statusEl.textContent = "Image mein koi saaf text detect nahi hua. Better light ya B/W filter try karein.";
+    statusEl.textContent = "Image mein koi saaf text detect nahi hua. Color ya B/W filter lagakar try karein.";
   }
 };
 
@@ -902,7 +1525,7 @@ function clearOcrText() {
   document.getElementById("ocrStatus").textContent = "Cleared.";
 }
 
-// ===== 8. EXPORT JPEG & PURE-JS MULTI-PAGE PDF GENERATOR =====
+// ===== 12. EXPORT JPEG & PURE-JS MULTI-PAGE PDF =====
 async function exportSingleJpg(docId, action) {
   const allDocs = await dbGetAll("docs");
   const doc = allDocs.find((d) => d.id === docId);
@@ -1048,7 +1671,7 @@ function buildMultiPagePdf(pages, pageW, pageH) {
   return merged;
 }
 
-// ===== 9. QR CODE & BARCODE =====
+// ===== 13. QR CODE & BARCODE =====
 function scanQrImage(event) {
   const file = event.target.files?.[0];
   event.target.value = "";
