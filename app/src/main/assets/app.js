@@ -1251,9 +1251,10 @@ function applyCurrentFilterToWarped() {
   }
 }
 
-// Estimates local paper background so shadows & yellow light turn clean white
+  // Estimates saturation-safe local paper background so shadows turn white
+// without erasing colored boxes, stamps, or light-colored text
 function buildLocalBackgroundMap(canvas, w, h) {
-  const div = Math.max(12, Math.round(Math.max(w, h) / 46));
+  const div = Math.max(16, Math.round(Math.max(w, h) / 26));
   const bw = Math.max(8, Math.round(w / div));
   const bh = Math.max(8, Math.round(h / div));
 
@@ -1267,24 +1268,61 @@ function buildLocalBackgroundMap(canvas, w, h) {
   const sd = sImg.data;
   const copy = new Uint8ClampedArray(sd);
 
-  // 3x3 local maximum filter removes text from background estimation
+  // Step 1: Estimate global neutral paper white color (low saturation + high brightness)
+  const neutralCandidates = [];
+  for (let i = 0; i < copy.length; i += 4) {
+    const r = copy[i], g = copy[i + 1], b = copy[i + 2];
+    const maxC = Math.max(r, g, b);
+    const minC = Math.min(r, g, b);
+    const sat = maxC - minC;
+    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+    if (sat < 38 && lum > 105) {
+      neutralCandidates.push({ r, g, b, lum });
+    }
+  }
+  let gPaperR = 235, gPaperG = 235, gPaperB = 235;
+  if (neutralCandidates.length >= 6) {
+    neutralCandidates.sort((a, b) => a.lum - b.lum);
+    const pIdx = Math.min(neutralCandidates.length - 1, Math.floor(neutralCandidates.length * 0.85));
+    gPaperR = Math.max(155, neutralCandidates[pIdx].r);
+    gPaperG = Math.max(155, neutralCandidates[pIdx].g);
+    gPaperB = Math.max(155, neutralCandidates[pIdx].b);
+  }
+
+  // Step 2: 5x5 local max filter (only trusting low-saturation paper pixels)
   for (let y = 0; y < bh; y++) {
     for (let x = 0; x < bw; x++) {
-      let maxR = 0, maxG = 0, maxB = 0;
-      for (let dy = -1; dy <= 1; dy++) {
+      let bestLum = -1;
+      let br = gPaperR, bg = gPaperG, bb = gPaperB;
+
+      for (let dy = -2; dy <= 2; dy++) {
         const yy = Math.max(0, Math.min(bh - 1, y + dy));
-        for (let dx = -1; dx <= 1; dx++) {
+        for (let dx = -2; dx <= 2; dx++) {
           const xx = Math.max(0, Math.min(bw - 1, x + dx));
           const ii = (yy * bw + xx) * 4;
-          if (copy[ii] > maxR) maxR = copy[ii];
-          if (copy[ii + 1] > maxG) maxG = copy[ii + 1];
-          if (copy[ii + 2] > maxB) maxB = copy[ii + 2];
+          const r = copy[ii], g = copy[ii + 1], b = copy[ii + 2];
+          const sat = Math.max(r, g, b) - Math.min(r, g, b);
+          const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+          // Prefer bright neutral paper pixels over colored blocks/logos
+          const score = lum - sat * 1.1;
+          if (score > bestLum) {
+            bestLum = score;
+            br = r; bg = g; bb = b;
+          }
         }
       }
+
+      // If local patch is strongly colored or too dark, pull back toward global paper white
+      const localSat = Math.max(br, bg, bb) - Math.min(br, bg, bb);
+      const pull = Math.min(1, Math.max(0, (localSat - 24) / 36));
+      br = br * (1 - pull) + gPaperR * pull;
+      bg = bg * (1 - pull) + gPaperG * pull;
+      bb = bb * (1 - pull) + gPaperB * pull;
+
       const oi = (y * bw + x) * 4;
-      sd[oi] = maxR;
-      sd[oi + 1] = maxG;
-      sd[oi + 2] = maxB;
+      sd[oi] = Math.max(105, Math.min(255, br));
+      sd[oi + 1] = Math.max(105, Math.min(255, bg));
+      sd[oi + 2] = Math.max(105, Math.min(255, bb));
     }
   }
   sctx.putImageData(sImg, 0, 0);
@@ -1298,61 +1336,98 @@ function buildLocalBackgroundMap(canvas, w, h) {
   return bgCtx.getImageData(0, 0, w, h).data;
 }
 
+function applyUnsharpLuminance(d, w, h, amount) {
+  const copy = new Uint8ClampedArray(d);
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const idx = (y * w + x) * 4;
+      const top = idx - w * 4;
+      const bot = idx + w * 4;
+      const left = idx - 4;
+      const right = idx + 4;
+
+      for (let c = 0; c < 3; c++) {
+        const blur = (copy[idx + c] * 4 + copy[top + c] + copy[bot + c] + copy[left + c] + copy[right + c]) * 0.125;
+        const sharp = copy[idx + c] + (copy[idx + c] - blur) * amount;
+        d[idx + c] = Math.max(0, Math.min(255, sharp));
+      }
+    }
+  }
+}
+
 function applyPixelFilter(ctx, w, h, mode) {
   const imgData = ctx.getImageData(0, 0, w, h);
   const d = imgData.data;
 
-  // Shadow-removing white paper + rich color text modes
-  if (mode === "color" || mode === "bw" || mode === "grey") {
+  // Color, Auto Enhance (magic), B/W, and Grey all use shadow-free paper whitening
+  if (mode === "color" || mode === "magic" || mode === "bw" || mode === "grey") {
     const bgD = buildLocalBackgroundMap(ctx.canvas, w, h);
 
     for (let i = 0; i < d.length; i += 4) {
-      const br = Math.max(45, bgD[i]);
-      const bg = Math.max(45, bgD[i + 1]);
-      const bb = Math.max(45, bgD[i + 2]);
+      const br = bgD[i];
+      const bg = bgD[i + 1];
+      const bb = bgD[i + 2];
 
-      // Normalize against local paper color -> shadows & yellow cast become pure white
-      let r = (d[i] / br) * 255;
-      let g = (d[i + 1] / bg) * 255;
-      let b = (d[i + 2] / bb) * 255;
+      // Remove uneven shadow & yellow tint relative to local paper
+      let r = Math.min(255, (d[i] / br) * 255);
+      let g = Math.min(255, (d[i + 1] / bg) * 255);
+      let b = Math.min(255, (d[i + 2] / bb) * 255);
 
-      if (mode === "color") {
-        // Stretch paper near white, preserve & deepen text ink
-        r = ((r - 20) / (224 - 20)) * 255;
-        g = ((g - 20) / (224 - 20)) * 255;
-        b = ((b - 20) / (224 - 20)) * 255;
-        r = Math.max(0, Math.min(255, r));
-        g = Math.max(0, Math.min(255, g));
-        b = Math.max(0, Math.min(255, b));
-
+      if (mode === "color" || mode === "magic") {
+        const maxC = Math.max(r, g, b);
+        const minC = Math.min(r, g, b);
+        const sat = maxC - minC;
         const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-        if (lum >= 236) {
-          r = g = b = 255; // Pure clean white paper
-        } else {
-          // Boost text color vibrancy (blue pen, red stamp, colored headings)
-          const satBoost = 1.48;
-          r = lum + (r - lum) * satBoost;
-          g = lum + (g - lum) * satBoost;
-          b = lum + (b - lum) * satBoost;
-          // Make text slightly richer & bolder
-          const inkDepth = 0.85 + 0.15 * (lum / 236);
-          r *= inkDepth;
-          g *= inkDepth;
-          b *= inkDepth;
-        }
+
+        // Only neutral bright paper fades to white; colored or faint ink stays 100% protected
+        const whiteStart = mode === "color" ? 218 : 224;
+        const whiteFull = mode === "color" ? 242 : 246;
+        const lumF = Math.max(0, Math.min(1, (lum - whiteStart) / (whiteFull - whiteStart)));
+        const neuF = Math.max(0, Math.min(1, (26 - sat) / 16));
+        const rawBlend = lumF * neuF;
+        const paperBlend = rawBlend * rawBlend * (3 - 2 * rawBlend);
+
+        // Smooth gamma ink-deepening (no hard white clipping on light text or colors)
+        const gamma = mode === "color" ? 1.22 : 1.28;
+        const lumNorm = lum / 255;
+        const targetLum = Math.pow(lumNorm, gamma) * 255;
+        const lumScale = lum > 1 ? targetLum / lum : 1;
+
+        let cr = r * lumScale;
+        let cg = g * lumScale;
+        let cb = b * lumScale;
+
+        // Keep colored ink (blue/red/green/yellow) rich & vivid without washing out
+        const newLum = 0.299 * cr + 0.587 * cg + 0.114 * cb;
+        const satBoost = mode === "color" ? 1.32 : 1.2;
+        cr = newLum + (cr - newLum) * satBoost;
+        cg = newLum + (cg - newLum) * satBoost;
+        cb = newLum + (cb - newLum) * satBoost;
+
+        r = cr + (255 - cr) * paperBlend;
+        g = cg + (255 - cg) * paperBlend;
+        b = cb + (255 - cb) * paperBlend;
       } else if (mode === "bw") {
         const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-        const v = lum > 192 ? 255 : 0;
+        const v = lum > 195 ? 255 : 0;
         r = g = b = v;
       } else if (mode === "grey") {
         let lum = 0.299 * r + 0.587 * g + 0.114 * b;
-        lum = ((lum - 24) / (225 - 24)) * 255;
-        r = g = b = lum > 236 ? 255 : lum;
+        const lumF = Math.max(0, Math.min(1, (lum - 216) / 26));
+        const ink = Math.pow(lum / 255, 1.25) * 255;
+        r = g = b = ink + (255 - ink) * lumF;
       }
 
       d[i] = Math.max(0, Math.min(255, r));
       d[i + 1] = Math.max(0, Math.min(255, g));
       d[i + 2] = Math.max(0, Math.min(255, b));
+    }
+
+    // Add gentle crispness to text edges in Auto Enhance & Color modes
+    if (mode === "magic") {
+      applyUnsharpLuminance(d, w, h, 0.55);
+    } else if (mode === "color") {
+      applyUnsharpLuminance(d, w, h, 0.28);
     }
 
     ctx.putImageData(imgData, 0, 0);
@@ -1373,7 +1448,7 @@ function applyPixelFilter(ctx, w, h, mode) {
           const avg = sum / 9;
           const idx = (y * w + x) * 4 + c;
           let val = avg + (copy[idx] - avg) * 0.45;
-          val = (val - 128) * 1.28 + 140;
+          val = (val - 128) * 1.25 + 136;
           d[idx] = Math.max(0, Math.min(255, val));
         }
       }
@@ -1384,24 +1459,17 @@ function applyPixelFilter(ctx, w, h, mode) {
 
   for (let i = 0; i < d.length; i += 4) {
     let r = d[i], g = d[i + 1], b = d[i + 2];
-
-    if (mode === "magic") {
-      r = (r - 115) * 1.45 + 138;
-      g = (g - 115) * 1.45 + 138;
-      b = (b - 115) * 1.45 + 138;
-    } else if (mode === "dark") {
-      r = (r - 128) * 1.4 + 92;
-      g = (g - 128) * 1.4 + 92;
-      b = (b - 128) * 1.4 + 92;
+    if (mode === "dark") {
+      r = (r - 128) * 1.38 + 92;
+      g = (g - 128) * 1.38 + 92;
+      b = (b - 128) * 1.38 + 92;
     }
-
     d[i] = Math.max(0, Math.min(255, r));
     d[i + 1] = Math.max(0, Math.min(255, g));
     d[i + 2] = Math.max(0, Math.min(255, b));
   }
   ctx.putImageData(imgData, 0, 0);
 }
-
 async function saveEditedDoc() {
   if (!filteredCanvas.width) return notify("Pehle photo scan aur straighten karein");
   const dataUrl = filteredCanvas.toDataURL("image/jpeg", 0.92);
