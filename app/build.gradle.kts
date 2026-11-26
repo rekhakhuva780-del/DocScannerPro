@@ -11,8 +11,8 @@ android {
         applicationId = "com.docscanner.pro"
         minSdk = 24
         targetSdk = 34
-        versionCode = 2
-        versionName = "2.0"
+        versionCode = 3
+        versionName = "2.2"
     }
 
     buildTypes {
@@ -37,5 +37,6 @@ dependencies {
     implementation("com.google.mlkit:barcode-scanning:17.2.0")
     implementation("com.google.mlkit:text-recognition:16.0.1")
     implementation("com.google.mlkit:text-recognition-devanagari:16.0.1")
+    implementation("cz.adaptech.tesseract4android:tesseract4android:4.7.0")
     implementation("com.google.zxing:core:3.5.3")
 }
