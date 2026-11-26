@@ -19,6 +19,12 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Download Offline Gujarati and English OCR Models
+        run: |
+          mkdir -p app/src/main/assets/tessdata
+          curl -L --fail -o app/src/main/assets/tessdata/guj.traineddata https://github.com/tesseract-ocr/tessdata_fast/raw/main/guj.traineddata
+          curl -L --fail -o app/src/main/assets/tessdata/eng.traineddata https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -32,4 +38,3 @@ jobs:
         with:
           name: DocScannerPro-APK
           path: app/build/outputs/apk/debug/app-debug.apk
-          
