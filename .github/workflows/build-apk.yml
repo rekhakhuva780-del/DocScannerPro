@@ -19,11 +19,112 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Download Offline Gujarati and English OCR Models
+      - name: Download Offline Gujarati OCR Engine and Models
         run: |
-          mkdir -p app/src/main/assets/tessdata
+          mkdir -p app/src/main/assets/tessdata app/libs
           curl -L --fail -o app/src/main/assets/tessdata/guj.traineddata https://github.com/tesseract-ocr/tessdata_fast/raw/main/guj.traineddata
           curl -L --fail -o app/src/main/assets/tessdata/eng.traineddata https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata
+
+          python3 - << 'EOF'
+          import json, os, urllib.request, zipfile
+
+          OUT = "app/libs/tesseract4android.aar"
+          HEADERS = {"User-Agent": "DocScannerPro-Build/1.0"}
+
+          def fetch_json(url):
+              req = urllib.request.Request(url, headers=HEADERS)
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  return json.loads(r.read().decode("utf-8"))
+
+          def try_download_aar(url):
+              print("Trying:", url)
+              try:
+                  req = urllib.request.Request(url, headers=HEADERS)
+                  with urllib.request.urlopen(req, timeout=60) as r:
+                      data = r.read()
+                  if len(data) < 100000:
+                      print("File too small:", len(data))
+                      return False
+                  with open(OUT, "wb") as f:
+                      f.write(data)
+                  if zipfile.is_zipfile(OUT):
+                      print("SUCCESS! Valid AAR downloaded:", len(data), "bytes")
+                      return True
+                  os.remove(OUT)
+              except Exception as e:
+                  print("Skip:", e)
+              return False
+
+          downloaded = False
+
+          # 1. Search Maven Central for tesseract4android AAR
+          try:
+              res = fetch_json("https://search.maven.org/solrsearch/select?q=tesseract4android&rows=25&wt=json")
+              docs = res.get("response", {}).get("docs", [])
+              def rank(d):
+                  g = d.get("g", "").lower()
+                  a = d.get("a", "").lower()
+                  p = d.get("p", "").lower()
+                  s = 0
+                  if p == "aar": s += 100
+                  if "adaptech" in g: s += 50
+                  if a == "tesseract4android": s += 40
+                  elif "tesseract4android" in a: s += 30
+                  if "openmp" not in a: s += 5
+                  return s
+              docs.sort(key=rank, reverse=True)
+              for d in docs:
+                  g, a, v = d.get("g"), d.get("a"), d.get("latestVersion")
+                  if not (g and a and v) or "tesseract" not in (g + a).lower():
+                      continue
+                  g_path = g.replace(".", "/")
+                  url = f"https://repo1.maven.org/maven2/{g_path}/{a}/{v}/{a}-{v}.aar"
+                  if try_download_aar(url):
+                      downloaded = True
+                      break
+          except Exception as e:
+              print("Maven search error:", e)
+
+          # 2. Fallback: Check GitHub Releases of adaptech-cz/Tesseract4Android
+          if not downloaded:
+              try:
+                  rels = fetch_json("https://api.github.com/repos/adaptech-cz/Tesseract4Android/releases?per_page=5")
+                  for rel in rels:
+                      assets = rel.get("assets", [])
+                      assets.sort(key=lambda x: "openmp" in x.get("name", "").lower())
+                      for asset in assets:
+                          if asset.get("name", "").lower().endswith(".aar"):
+                              if try_download_aar(asset["browser_download_url"]):
+                                  downloaded = True
+                                  break
+                      if downloaded:
+                          break
+              except Exception as e:
+                  print("GitHub releases error:", e)
+
+          # 3. Fallback: Try JitPack for latest tag
+          if not downloaded:
+              try:
+                  rels = fetch_json("https://api.github.com/repos/adaptech-cz/Tesseract4Android/releases?per_page=3")
+                  for rel in rels:
+                      tag = rel.get("tag_name", "")
+                      if not tag:
+                          continue
+                      for url in [
+                          f"https://jitpack.io/com/github/adaptech-cz/Tesseract4Android/tesseract4android/{tag}/tesseract4android-{tag}.aar",
+                          f"https://jitpack.io/com/github/adaptech-cz/Tesseract4Android/{tag}/Tesseract4Android-{tag}.aar",
+                      ]:
+                          if try_download_aar(url):
+                              downloaded = True
+                              break
+                      if downloaded:
+                          break
+              except Exception as e:
+                  print("JitPack error:", e)
+
+          if not downloaded:
+              raise SystemExit("ERROR: tesseract4android.aar download nahi ho paya.")
+          EOF
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
