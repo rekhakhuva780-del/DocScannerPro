@@ -46,6 +46,7 @@ import com.google.mlkit.vision.text.devanagari.DevanagariTextRecognizerOptions
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
+import com.googlecode.tesseract.android.TessBaseAPI
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -166,6 +167,25 @@ class MainActivity : AppCompatActivity() {
         val dir = File(cacheDir, "exports")
         if (!dir.exists()) dir.mkdirs()
         return dir
+    }
+
+    private fun prepareTesseractDataDir(): File {
+        val baseDir = File(filesDir, "tesseract")
+        val tessDir = File(baseDir, "tessdata")
+        if (!tessDir.exists()) tessDir.mkdirs()
+
+        val filesToCopy = listOf("guj.traineddata", "eng.traineddata")
+        for (fileName in filesToCopy) {
+            val outFile = File(tessDir, fileName)
+            if (!outFile.exists() || outFile.length() == 0L) {
+                assets.open("tessdata/$fileName").use { input ->
+                    FileOutputStream(outFile).use { output ->
+                        input.copyTo(output)
+                    }
+                }
+            }
+        }
+        return baseDir
     }
 
     inner class AndroidBridge {
@@ -349,6 +369,57 @@ class MainActivity : AppCompatActivity() {
 
         @JavascriptInterface
         fun runOcrFromBase64(base64Image: String, langMode: String) {
+            if (langMode == "gu") {
+                Thread {
+                    var tess: TessBaseAPI? = null
+                    try {
+                        val bytes = Base64.decode(base64Image, Base64.DEFAULT)
+                        val rawBmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                        if (rawBmp == null) {
+                            webView.post {
+                                webView.evaluateJavascript("window.onNativeOcrResult('', 'Image read nahi hui')", null)
+                            }
+                            return@Thread
+                        }
+
+                        val argbBmp = if (rawBmp.config == Bitmap.Config.ARGB_8888) {
+                            rawBmp
+                        } else {
+                            rawBmp.copy(Bitmap.Config.ARGB_8888, false)
+                        }
+
+                        val dataDir = prepareTesseractDataDir()
+                        tess = TessBaseAPI()
+                        val initialized = tess.init(dataDir.absolutePath, "guj+eng")
+                        if (!initialized) {
+                            webView.post {
+                                webView.evaluateJavascript("window.onNativeOcrResult('', 'Gujarati OCR init failed')", null)
+                            }
+                            return@Thread
+                        }
+
+                        tess.setPageSegMode(TessBaseAPI.PageSegMode.PSM_AUTO)
+                        tess.setImage(argbBmp)
+                        val extracted = tess.getUTF8Text() ?: ""
+                        val safeText = JSONObject.quote(extracted.trim())
+                        webView.post {
+                            webView.evaluateJavascript("window.onNativeOcrResult($safeText, '')", null)
+                        }
+                    } catch (e: Exception) {
+                        val err = JSONObject.quote(e.message ?: "Gujarati OCR error")
+                        webView.post {
+                            webView.evaluateJavascript("window.onNativeOcrResult('', $err)", null)
+                        }
+                    } finally {
+                        try {
+                            tess?.recycle()
+                        } catch (_: Exception) {
+                        }
+                    }
+                }.start()
+                return
+            }
+
             try {
                 val bytes = Base64.decode(base64Image, Base64.DEFAULT)
                 val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
