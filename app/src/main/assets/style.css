@@ -15,7 +15,7 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 
 .icon-btn, .small-btn {
   background: #334155; color: #f8fafc; border: none; border-radius: 8px;
-  padding: 8px 11px; font-size: 13px; cursor: pointer;
+  padding: 7px 10px; font-size: 12px; cursor: pointer;
 }
 .primary { background: #0ea5e9; color: #0f172a; font-weight: 700; }
 .hidden { display: none !important; }
@@ -24,13 +24,12 @@ main {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 12px;
+  padding: 10px 12px;
 }
 
 .tab-panel { display: none; }
 .tab-panel.active { display: block; }
 
-/* FULL-FIT EDITOR LAYOUT: Poori image ek screen par bina scroll aur bina kate */
 #tab-editor.active {
   display: flex;
   flex-direction: column;
@@ -39,10 +38,28 @@ main {
 }
 
 .breadcrumb-bar, .export-bar, .editor-header, .row-btns {
-  display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 10px;
+  display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 8px;
 }
 .editor-header { flex-shrink: 0; justify-content: space-between; }
 #folderPath { flex: 1; font-weight: 600; color: #38bdf8; }
+
+.batch-bar {
+  flex-shrink: 0;
+  display: flex; justify-content: space-between; align-items: center;
+  background: #0c4a6e; border: 1px solid #0284c7; border-radius: 8px;
+  padding: 6px 10px; margin-bottom: 8px; font-size: 12px; font-weight: 600;
+}
+.batch-btns { display: flex; gap: 6px; }
+
+.zoom-bar {
+  flex-shrink: 0;
+  display: flex; justify-content: space-between; align-items: center;
+  background: #1e293b; border: 1px solid #334155; border-radius: 8px;
+  padding: 5px 10px; margin-bottom: 8px;
+}
+.zoom-title { font-size: 11px; color: #94a3b8; }
+.zoom-btns { display: flex; gap: 6px; align-items: center; }
+.zoom-btns button { min-width: 34px; padding: 5px 8px; font-weight: 700; }
 
 .action-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
 .action-card {
@@ -64,17 +81,16 @@ select, input[type="text"], textarea {
   background: #1e293b; padding: 12px; border-radius: 10px; border: 1px solid #334155;
 }
 
-.doc-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; padding-bottom: 12px; }
+.doc-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; padding-bottom: 14px; }
 .doc-card {
   background: #1e293b; border-radius: 10px; overflow: hidden; border: 1px solid #334155;
 }
-.doc-card img { width: 100%; height: 145px; object-fit: cover; background: #020617; }
+.doc-card img { width: 100%; height: 145px; object-fit: cover; background: #020617; cursor: pointer; }
 .doc-meta { padding: 8px; }
 .doc-meta p { font-size: 12px; margin-bottom: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.doc-actions { display: flex; gap: 4px; flex-wrap: wrap; }
-.doc-actions button { flex: 1; font-size: 11px; padding: 5px 4px; }
+.doc-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+.doc-actions button { font-size: 11px; padding: 5px 3px; }
 
-/* Full-Fit Canvas Stage */
 .canvas-stage {
   flex: 1;
   min-height: 0;
@@ -109,10 +125,10 @@ select, input[type="text"], textarea {
 .crop-hint {
   flex-shrink: 0;
   text-align: center;
-  font-size: 12px;
+  font-size: 11px;
   color: #cbd5e1;
   background: #1e293b;
-  padding: 8px 10px;
+  padding: 7px 10px;
   border-radius: 8px;
 }
 
